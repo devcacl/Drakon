@@ -1,0 +1,201 @@
+# DRAKON
+
+![Drakon](src/drakon/infraestructura/web/static/drakon/avatar/logo_completo.png)
+
+[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+[![CD](../../actions/workflows/cd.yml/badge.svg)](../../actions/workflows/cd.yml)
+
+Sistema de Gestión de Auditorías de Sistemas de Información (proyecto académico, Ingeniería de Sistemas).
+Apoya una auditoría básica de seguridad de la información con ISO/IEC 27002:2022: configurar la auditoría, seleccionar controles, evaluarlos, registrar evidencias, documentar hallazgos y recomendaciones y generar el informe consolidado.
+
+## Arquitectura y organización de carpetas
+
+```
+infraestructura  →  aplicación  →  dominio        (las dependencias apuntan hacia el centro)
+```
+
+| Capa | Carpeta | Contenido |
+|---|---|---|
+| Dominio | `src/drakon/dominio/` | Agregados `Auditoria`, `Control` e `Informe`, estados, reglas de negocio e indicadores. Python puro. |
+| Aplicación | `src/drakon/aplicacion/` | `puertos/` (interfaces) y `casos_uso/` (una clase por acción del usuario, RF01–RF09). |
+| Infraestructura | `src/drakon/infraestructura/` | Adaptadores: `web/` (Django), `persistencia/` (ORM + PostgreSQL), `evidencias/`, `pdf/` y `contenedor.py` (inyección de dependencias). |
+
+La estructura principal del repositorio es:
+
+```text
+Drakon/
+├── .github/workflows/             # Flujos de CI y CD
+├── fixtures/                      # Catálogo inicial de controles ISO 27002
+├── src/drakon/
+│   ├── dominio/                   # Entidades, reglas e indicadores
+│   ├── aplicacion/
+│   │   ├── casos_uso/             # Acciones y procesos de la aplicación
+│   │   └── puertos/               # Interfaces para comunicar capas
+│   └── infraestructura/
+│       ├── django_config/         # Configuración y arranque de Django
+│       ├── evidencias/            # Almacenamiento de evidencias
+│       ├── pdf/                   # Generación de informes PDF
+│       ├── persistencia/          # Modelos, repositorios y migraciones
+│       └── web/                   # Vistas, formularios, plantillas y estáticos
+├── tests/
+│   ├── aceptacion/                # Flujos completos por HTTP
+│   ├── integracion/               # Repositorios y base de datos
+│   └── unit/                      # Dominio y casos de uso
+├── manage.py                      # Comandos de Django
+├── Dockerfile                     # Imagen de la aplicación
+└── docker-compose.yml             # Aplicación y PostgreSQL para desarrollo
+```
+
+
+La regla de dependencia se verifica automáticamente:
+
+```bash
+PYTHONPATH=src lint-imports
+```
+
+## Ejecutar en local
+
+```bash
+python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -r requirements-dev.txt
+export DEBUG=true                                       # Windows: set DEBUG=true
+python manage.py migrate
+python manage.py inicializar                            # roles + 93 controles ISO 27002
+python manage.py createsuperuser
+python manage.py cargar_empresa_abc --usuario ana --clave "Prueba-2026!"   # datos de la demo
+python manage.py runserver
+```
+
+Sin `DATABASE_URL` se usa SQLite; con ella, PostgreSQL. **Plan B con Docker:** `docker compose up --build` levanta la app y su PostgreSQL en http://localhost:8000 (usuario `admin`, clave `Admin-2026!`).
+
+## Pruebas
+
+```bash
+pytest                    # unitarias, de integración y de aceptación (CP-01 a CP-13)
+PYTHONPATH=src lint-imports
+```
+
+- `tests/unit/`: dominio y casos de uso con adaptadores en memoria (sin base de datos).
+- `tests/integracion/`: repositorios y restricciones CHECK/UNIQUE en la base de datos.
+- `tests/aceptacion/`: flujo por HTTP.
+
+Para probar contra PostgreSQL: `DATABASE_URL=postgresql://... pytest`.
+
+## Docker
+
+| Archivo | Para qué |
+|---|---|
+| `Dockerfile` | Imagen de producción en dos etapas: dependencias en un entorno aislado, imagen final liviana, usuario sin privilegios (`drakon`), `HEALTHCHECK` sobre `/salud/` y estáticos ya compilados. |
+| `docker-compose.yml` | Entorno local completo: la app más PostgreSQL 16. También lo usa el CI para la prueba de humo. |
+| `.dockerignore` | Deja fuera `.venv`, pruebas, base local, secretos y cachés. |
+
+```bash
+docker compose up --build        # http://localhost:8000  ·  admin / Admin-2026!  ·  ana / Prueba-2026!
+docker compose down -v           # apagar y borrar los datos locales
+```
+
+## CI/CD (GitHub Actions)
+
+```
+push / pull request ──► CI ─┬─ Calidad: ruff (estilo) · import-linter (hexagonal) · migraciones al día
+                            ├─ Pruebas: pytest contra PostgreSQL 16 · cobertura mínima 85 %
+                            └─ Docker: construye la imagen · docker compose up · verifica /salud/, ingreso y estáticos
+                                   │
+                         (solo main y CI en verde)
+                                   ▼
+                                  CD ── publica la imagen en ghcr.io/<usuario>/drakon (latest y sha-<commit>)
+                                   └── Railway despliega con «Wait for CI»
+```
+
+| Archivo | Qué hace |
+|---|---|
+| `.github/workflows/ci.yml` | Integración continua en cada push y pull request. |
+| `.github/workflows/cd.yml` | Entrega continua: publica la imagen versionada en GitHub Container Registry. |
+| `.github/dependabot.yml` | Cada semana propone actualizaciones de dependencias, de la imagen base y de las acciones. |
+
+Para revisar localmente lo mismo que el CI:
+```bash
+ruff check src tests && ruff format --check src tests
+PYTHONPATH=src lint-imports
+pytest --cov --cov-fail-under=85
+```
+
+## Despliegue en Railway (sin tarjeta)
+
+1. **Neon:** copia el connection string **directo** (sin `-pooler`).
+2. **Railway** (railway.com) → entra con GitHub → *New Project → Deploy from GitHub repo* → elige `drakon`. Railway detecta el `Dockerfile` y el `railway.json` (con el chequeo de salud en `/salud/`).
+3. **Variables** del servicio: `DATABASE_URL`, `SECRET_KEY` (cadena larga aleatoria), `DEBUG=false`, `DJANGO_SUPERUSER_USERNAME`, `DJANGO_SUPERUSER_PASSWORD`, `DEMO_USUARIO`, `DEMO_CLAVE`.
+4. **Settings → Networking → Generate Domain** para obtener la URL pública (`*.up.railway.app`). Django la acepta sola gracias a `RAILWAY_PUBLIC_DOMAIN`.
+5. **Settings → Source → «Wait for CI»**: actívalo para que Railway despliegue solo cuando el CI de GitHub pase. Ese es el último eslabón del CD.
+
+La prueba gratuita de Railway trae $5 de crédito único por 30 días y no pide tarjeta. Después, el plan Free da $1 de crédito al mes.
+
+## Despliegue alternativo (Render)
+
+| Componente | Servicio |
+|---|---|
+| Aplicación | Render, Web Service gratuito (Docker), con `render.yaml` |
+| Base de datos | Neon, plan Free (PostgreSQL, sin vencimiento) |
+| Evidencias | En PostgreSQL (máx. 5 MB; PDF, PNG o JPG) |
+| Disponibilidad | Monitor HTTP gratuito llamando a `/salud/` cada 10 minutos |
+
+1. **Neon:** crear el proyecto `drakon` y copiar el *connection string* (`postgresql://...?sslmode=require`).
+2. **Render:** *New → Blueprint* → elegir este repositorio. Render lee `render.yaml` y pide:
+   - `DATABASE_URL`: el connection string de Neon.
+   - `DJANGO_SUPERUSER_USERNAME` y `DJANGO_SUPERUSER_PASSWORD`: el administrador inicial.
+3. Cada `git push` a `main` redespliega. El contenedor migra, ejecuta `inicializar` y arranca gunicorn.
+4. **Datos de la demo:** el plan gratuito de Render no tiene consola. Define `DEMO_USUARIO` y `DEMO_CLAVE` en Render y, al arrancar, se carga Empresa ABC, solo si la base no tiene auditorías.
+5. **Monitor:** UptimeRobot o cron-job.org → `https://<app>.onrender.com/salud/` cada 10 minutos.
+
+**Antes de la sustentación:** respaldo con `pg_dump "$DATABASE_URL" > respaldo.dump`, revisar el monitor y abrir la URL 5 minutos antes.
+
+## Identidad visual (propuesta «Brasa» + aviso naranja)
+
+| Token | Color | Uso |
+|---|---|---|
+| Naranja Drakon | `#F47721` | Botones principales y aviso de inicio. Siempre con **texto carbón** (5,6:1), nunca blanco. |
+| Ember | `#B4531A` | Enlaces y texto naranja sobre fondos claros (5,0:1). |
+| Charcoal | `#252321` | Textos y botones secundarios. |
+| Warm White / Sand / Peach | `#F7F5F1` / `#EAE4DC` / `#FCE9DA` | Fondo general, superficies y resaltados. |
+| Success / Amber / Flame | `#287A56` / `#FFB84D` / `#E84932` | Implementado / Parcial / No implementado (se distingue con color y texto). |
+
+- Tipografía: Plus Jakarta Sans, incluida en el proyecto. Bootstrap y los íconos también se sirven localmente, sin depender de CDN.
+- Avatar: `static/drakon/avatar/`. Hay **máximo un Drakon por pantalla**, y nunca junto a tablas de datos de hallazgos. Poses: `bienvenida` (ingreso), `hero` (aviso de inicio), `vacio` (estados vacíos), `error` (bloqueos), `listo` (confirmaciones), `ayuda` (consejos), `celebracion` (auditoría cerrada).
+- Estilos: `static/drakon/drakon.css`.
+
+## Roles (RNF04)
+
+- **auditor:** gestiona solo sus auditorías.
+- **admin:** ve todas las auditorías y edita el catálogo de controles en `/admin/`. El usuario necesita `is_staff` para entrar al admin.
+
+## Matriz CRUD
+
+Todas las entidades tienen sus cuatro operaciones. Lo que cambia por entidad son las reglas del proceso auditor que las limitan.
+
+| Entidad | Crear | Consultar | Editar | Eliminar | Reglas |
+|---|---|---|---|---|---|
+| Auditoría | Sí | Sí lista, detalle, inicio | Sí en borrador o ejecución | Sí con confirmación | Una auditoría **cerrada** no se elimina ni se edita. |
+| Control (catálogo) | Sí rol admin | Sí todos | Sí rol admin | Sí rol admin | Código único. No se elimina si una auditoría lo usa. |
+| Selección de controles | Sí | Sí | Sí en borrador | Sí al desmarcarlo | Entre 10 y 15 para iniciar la ejecución. |
+| Evaluación de control | Sí | Sí | Sí en ejecución | — | La evaluación se corrige; no se borra. «No aplicable» exige justificación. |
+| Evidencia | Sí | Sí y descarga | Sí en ejecución | Sí con confirmación | Archivo PDF/PNG/JPG validado o referencia. |
+| Hallazgo | Sí | Sí | Sí en ejecución o revisión | Sí con confirmación | Conserva su código H-nn; no aplica a controles «No aplicable». |
+| Recomendación | Sí | Sí | Sí en ejecución o revisión | Sí con confirmación | Cada hallazgo necesita al menos una para cerrar. |
+| Informe | Sí genera versiones | Sí PDF | — | — | Es una instantánea: no se edita, se emite una nueva versión. |
+
+Ninguna eliminación ocurre con un GET: siempre hay una página de confirmación que muestra lo que se afecta. Cada auditor solo ve y modifica sus propias auditorías (RNF04).
+
+## Estado del avance
+
+| Requisito | Dominio y casos de uso | Interfaz web |
+|---|---|---|
+| RF01 Registrar auditoría | Sí | Sí |
+| RF02 Gestionar y seleccionar controles | Sí | Sí |
+| RF03 Evaluar controles | Sí | Sí |
+| RF04 Registrar evidencias | Sí | Sí (archivo o referencia; valida el tipo real del archivo) |
+| RF05/RF06 Hallazgos y recomendaciones | Sí | Sí |
+| RF07 Indicadores | Sí | Sí (dashboard y detalle) |
+| RF08 Informe PDF | Sí | Sí (botón en el detalle; versiones preliminares y final) |
+| RF09 Dashboard | Sí | Sí |
+
+> Los indicadores son descriptivos: no constituyen certificación ni sustituyen el juicio profesional del auditor. Todos los datos de Empresa ABC son ficticios.
