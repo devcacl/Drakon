@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.env
+db.sqlite3
+staticfiles/
+.pytest_cache/
+.venv/
+*.dump
+.import_linter_cache/
+Claude outputs/
+.coverage
+coverage.xml
+htmlcov/
+.ruff_cache/
